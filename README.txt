@@ -120,6 +120,8 @@ If your system uses the Python launcher:
 
 The first-start console appears before the graphical dashboard.
 
+Or just double click on the python file in your explorer when you want to use it.
+
 FULLSCREEN
 ----------
 Press F11 to enter the dashboard's fullscreen mode.
