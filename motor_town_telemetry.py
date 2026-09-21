@@ -479,6 +479,14 @@ class App:
         self._display_longitudinal_g = 0.0
         self._animating_gauge = False
         self._animating_g = False
+        self._self_check_active = False
+        self._self_check_triggered_for_running = False
+        self._startup_self_check_done = False
+        self._self_check_actual_states = {}
+        self._self_check_smoothing = 0.18
+        self._engine_was_running = False
+        self._self_check_actual_handbrake = False
+        self._self_check_after_id = None
         self._win_fullscreen_style = None
         self._win_fullscreen_exstyle = None
         self._fullscreen_hwnd = None
@@ -634,6 +642,10 @@ class App:
         )
 
     def button(self, parent, text, command, active=False, **kwargs):
+        # Allow callers to override the default button padding without
+        # passing the same Tkinter option twice.
+        padx = kwargs.pop("padx", 14)
+        pady = kwargs.pop("pady", 8)
         return tk.Button(
             parent,
             text=text,
@@ -644,8 +656,8 @@ class App:
             activeforeground="#ffffff",
             relief="flat",
             bd=0,
-            padx=14,
-            pady=8,
+            padx=padx,
+            pady=pady,
             font=("Segoe UI", 10, "bold"),
             cursor="hand2",
             **kwargs,
@@ -759,9 +771,9 @@ class App:
         hero = tk.Frame(content, bg=BG, height=285)
         hero.pack(fill="x", pady=(0, 5))
         hero.pack_propagate(False)
-        self.speed_gauge = self.make_gauge(hero, "SPEED", 0, 240, self.speed_unit)
+        self.speed_gauge = self.make_gauge(hero, "", 0, 240, self.speed_unit)
         self.speed_gauge.pack(side="left", fill="both", expand=True, padx=(0, 6))
-        self.rpm_gauge = self.make_gauge(hero, "RPM", 0, 10000, "RPM")
+        self.rpm_gauge = self.make_gauge(hero, "", 0, 10000, "RPM")
         self.rpm_gauge.pack(side="left", fill="both", expand=True, padx=(6, 0))
 
         # Compact transmission selector. It supports up to 3 reverse gears and
@@ -853,7 +865,7 @@ class App:
         # Compact note area for telemetry limitations / upcoming features.
         note = tk.Frame(dyn_inner, bg=PANEL2, highlightthickness=0, bd=0)
         note.pack(fill="x", padx=14, pady=(14, 10))
-        self.label(note, "NOTE", 8, ACCENT, True, bg=PANEL2).pack(anchor="w", padx=10, pady=(8, 2))
+        self.label(note, "NOTE", 8, self.accent, True, bg=PANEL2).pack(anchor="w", padx=10, pady=(8, 2))
         self.label(
             note,
             "Some features are not yet supported by Motor Town's telemetry output.\n"
@@ -914,10 +926,11 @@ class App:
                 c.create_text(tx, ty, text=text, fill=MUTED,
                               font=("Segoe UI", 8, "bold"))
 
-        # Keep the main title above the instrument, while placing the unit
-        # lower and centered so it does not collide with the upper tick labels.
-        c.create_text(cx, 15, text=frame._gauge_title, fill=TEXT,
-                      font=("Segoe UI", 14, "bold"))
+        # The User Mode gauges intentionally have no large title above them.
+        # The unit remains centered inside the instrument for a clean look.
+        if frame._gauge_title:
+            c.create_text(cx, 15, text=frame._gauge_title, fill=TEXT,
+                          font=("Segoe UI", 14, "bold"))
         c.create_text(cx, cy - radius * 0.43, text=frame._gauge_unit, fill=self.accent,
                       font=("Segoe UI", 8, "bold"))
 
@@ -948,7 +961,7 @@ class App:
             current = getattr(self, attr)
             # Exponential smoothing; the display keeps moving even when the
             # telemetry packet rate is much lower than the UI frame rate.
-            current += (target - current) * 0.18
+            current += (target - current) * self._self_check_smoothing
             if abs(target - current) < 0.02:
                 current = target
             setattr(self, attr, current)
@@ -959,19 +972,21 @@ class App:
         self.root.after(16, self.animate_gauges)
 
     def animate_g_meter(self):
-        if not hasattr(self, "g_canvas"):
+        """Continuously animate the G-force display at the UI frame rate.
+
+        Keep this loop alive even when the current G value is zero. Telemetry
+        updates arrive independently, so stopping the animation when the
+        target happens to be zero can make the meter appear frozen later.
+        """
+        if not hasattr(self, "g_canvas") or not self.root.winfo_exists():
             self._animating_g = False
             return
-        changed = False
+
         for attr, target in (("_display_lateral_g", self._target_lateral_g),
                              ("_display_longitudinal_g", self._target_longitudinal_g)):
             current = getattr(self, attr)
-            diff = target - current
-            if abs(diff) > 0.002:
-                # Smooth but responsive; telemetry itself arrives much slower than the UI.
-                current += diff * 0.16
-                changed = True
-            else:
+            current += (target - current) * 0.16
+            if abs(target - current) < 0.002:
                 current = target
             setattr(self, attr, current)
 
@@ -981,10 +996,8 @@ class App:
         self.long_g_history = self.long_g_history[-24:]
         self.draw_g_meter()
 
-        if changed or abs(self._target_lateral_g) > 0.002 or abs(self._target_longitudinal_g) > 0.002:
-            self.root.after(16, self.animate_g_meter)
-        else:
-            self._animating_g = False
+        self._animating_g = True
+        self.root.after(16, self.animate_g_meter)
 
     def draw_g_meter(self):
         if not hasattr(self, "g_canvas"):
@@ -1356,6 +1369,80 @@ class App:
 
         self.button(win, "GOT IT", close, active=True).pack(pady=25)
 
+    def start_self_check(self, data):
+        """Run the startup instrument/warning-light self-check exactly once."""
+        if self._self_check_active or self._startup_self_check_done:
+            return
+
+        self._startup_self_check_done = True
+        self._self_check_active = True
+        self._self_check_actual_handbrake = bool(data["handbrake"])
+        flags = data["flags"]
+        self._self_check_actual_states = {
+            "HANDBRAKE": bool(data["handbrake"]),
+            "LIGHTS": bool(flags & 0x08),
+            "ABS": bool(flags & 0x10),
+            "TCS": bool(flags & 0x20),
+            "CRUISE": bool(flags & 0x40),
+        }
+
+        # Slow the gauge animation down during the sweep so it feels like a
+        # real instrument self-test rather than an instant jump.
+        self._self_check_smoothing = 0.055
+        self._target_speed = self.speed_gauge._gauge_max
+        self._target_rpm = self.rpm_gauge._gauge_max
+
+        # Simulate the startup warning-light check.
+        for name in ("HANDBRAKE", "LIGHTS", "ABS", "TCS"):
+            self.user_flags[name].config(text="ACTIVE", fg=self.accent)
+
+        if self._self_check_after_id:
+            try:
+                self.root.after_cancel(self._self_check_after_id)
+            except Exception:
+                pass
+
+        # Hold the needles at maximum briefly, then make the return sweep.
+        self._self_check_after_id = self.root.after(2200, self._self_check_return_phase)
+
+    def _self_check_return_phase(self):
+        if not self._self_check_active:
+            return
+
+        self._target_speed = 0.0
+        self._target_rpm = 0.0
+        for name in ("HANDBRAKE", "LIGHTS", "ABS", "TCS"):
+            active = self._self_check_actual_states.get(name, False)
+            self.user_flags[name].config(
+                text="OFF" if not active else "ACTIVE",
+                fg=self.accent if active else MUTED
+            )
+
+        # Let the needles take their time returning to zero before handing
+        # control back to live telemetry.
+        self._self_check_after_id = self.root.after(2200, self._finish_self_check)
+
+    def _finish_self_check(self):
+        if not self._self_check_active:
+            return
+
+        self._self_check_active = False
+        self._self_check_after_id = None
+        self._self_check_smoothing = 0.18
+
+        for name, active in self._self_check_actual_states.items():
+            self.user_flags[name].config(
+                text="ACTIVE" if active else "OFF",
+                fg=self.accent if active else MUTED
+            )
+
+        # Return to the live telemetry values after the complete sweep.
+        data = self.receiver.snapshot()
+        if data:
+            speed = data["speed_kmh"] if self.speed_unit == "km/h" else data["speed_kmh"] * 0.621371
+            self._target_speed = speed
+            self._target_rpm = data["engine_rpm"]
+
     def update_ui(self):
         if hasattr(self, "footer_label"):
             self.footer_label.config(
@@ -1391,6 +1478,10 @@ class App:
             self._last_vehicle_timestamp = None
             self._target_speed = 0.0
             self._target_rpm = 0.0
+            self._engine_was_running = False
+            if self._self_check_active:
+                self._self_check_active = False
+                self._self_check_after_id = None
             if not self._animating_gauge:
                 self._animating_gauge = True
                 self.root.after(0, self.animate_gauges)
@@ -1420,8 +1511,15 @@ class App:
         max_speed = 240 if self.speed_unit == "km/h" else 150
         self.speed_gauge._gauge_max = max_speed
         self.speed_gauge._gauge_unit = self.speed_unit
-        self._target_speed = speed
-        self._target_rpm = data["engine_rpm"]
+
+        # The self-check belongs to dashboard startup, not to an RPM transition.
+        # It is triggered once when the first valid telemetry packet arrives.
+        if not self._startup_self_check_done:
+            self.start_self_check(data)
+
+        if not self._self_check_active:
+            self._target_speed = speed
+            self._target_rpm = data["engine_rpm"]
         if not self._animating_gauge:
             self._animating_gauge = True
             self.root.after(0, self.animate_gauges)
