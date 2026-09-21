@@ -8,7 +8,7 @@ telemetry protocol.
 RELEASES
 =============================
 
-The newest Releases are found [here.](https://github.com/LucBre-2009/motor-town-telemetry-dashboard/releases)
+The newest Releases are found (here.)[https://github.com/LucBre-2009/motor-town-telemetry-dashboard/releases]
 
 
 
