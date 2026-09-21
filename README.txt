@@ -4,9 +4,18 @@ MOTOR TOWN TELEMETRY DASHBOARD
 A desktop telemetry dashboard for Motor Town using the game's Native-v1 UDP
 telemetry protocol.
 
+
+RELEASES
+=============================
+
+The newest Releases are found [here.](https://github.com/LucBre-2009/motor-town-telemetry-dashboard/releases)
+
+
+
+
 FILES
 -----
-motor_town_telemetry.py
+motor_town_dashboard.pyw
     Main dashboard application.
 
 README.txt
@@ -61,8 +70,8 @@ The dashboard listens locally on UDP 127.0.0.1:33330.
 
 FIRST START
 -----------
-On the first launch, the console window displays the setup information and
-explains exactly what is required.
+On the first launch, a window displays the setup information and
+explains the GUI.
 
 The dashboard itself installs no external dependencies. After the setup
 message, press Enter to start the graphical dashboard.
@@ -110,22 +119,11 @@ The dashboard reads values such as:
 
 RUNNING THE DASHBOARD
 ---------------------
-From a Command Prompt or PowerShell in the folder containing the script:
-
-    python motor_town_telemetry.py
-
-If your system uses the Python launcher:
-
-    py motor_town_telemetry.py
-
-The first-start console appears before the graphical dashboard.
-
-Or just double click on the python file in your explorer when you want to use it.
+Just double click on the python file in your explorer when you want to use it.
 
 FULLSCREEN
 ----------
 Press F11 to enter the dashboard's fullscreen mode.
-Press ESC to leave fullscreen mode.
 
 The fullscreen mode is intended to cover the complete monitor area without
 the Windows taskbar.
