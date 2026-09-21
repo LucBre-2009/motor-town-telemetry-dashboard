@@ -500,7 +500,7 @@ class App:
         self.root.title(APP_NAME)
         self.root.configure(bg=BG)
         self.root.minsize(1100, 700)
-        self.root.state("normal")
+        self.root.state("zoomed")
 
         self.root.bind_all("<F11>", self.toggle_fullscreen)
         self.root.bind_all("<Escape>", self.leave_fullscreen)
