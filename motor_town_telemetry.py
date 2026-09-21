@@ -701,6 +701,11 @@ class App:
         self.settings_button = self.button(right, "⚙  SETTINGS", self.settings, active=False, padx=16, pady=8)
         self.settings_button.pack(side="left", padx=(8, 0))
 
+        self.close_button = self.button(
+            right, "CLOSE DASHBOARD", self.close_dashboard, active=False, padx=16, pady=8
+        )
+        self.close_button.pack(side="left", padx=(8, 0))
+
         self.body = tk.Frame(self.root, bg=BG)
         self.body.pack(fill="both", expand=True)
 
@@ -722,6 +727,12 @@ class App:
 
         self.footer_right = self.label(footer, "", 9, MUTED, bg=PANEL)
         self.footer_right.pack(side="right", padx=18)
+
+    def close_dashboard(self):
+        try:
+            self.receiver.stop()
+        finally:
+            self.root.destroy()
 
     def set_mode(self, mode):
         self.mode = mode
@@ -1616,12 +1627,14 @@ class App:
         # rather than incorrectly treating Cruise Control as Autopilot.
         self.user_flags["AUTOPILOT"].config(text="WORK IN PROGRESS", fg=MUTED)
 
-        # Rotate the displayed G-ball 90 degrees clockwise.
-        # The telemetry's current X component is the fore/aft acceleration:
-        # braking should move the ball UP and acceleration should move it DOWN.
-        # The telemetry Z component is used for the left/right axis.
+        # Native-v1 local vehicle axes:
+        # X = left/right, Y = vertical, Z = fore/aft.
+        # Use X for the lateral G meter so bumps/hills on the vertical Y axis
+        # do not incorrectly move the ball left/right.
+        # Native-v1 local acceleration: X is fore/aft and Z is lateral.
+        # Keep the display orientation with braking UP and acceleration DOWN.
         longitudinal_g = -data["acceleration"][0] / 980.665
-        lateral_g = -data["acceleration"][2] / 980.665
+        lateral_g = -data["acceleration"][1] / 980.665
         self._target_lateral_g = lateral_g
         self._target_longitudinal_g = longitudinal_g
         if not self._animating_g:
@@ -1809,11 +1822,7 @@ def main():
     if first_start:
         root.after(350, app.show_tutorial)
 
-    def close():
-        receiver.stop()
-        root.destroy()
-
-    root.protocol("WM_DELETE_WINDOW", close)
+    root.protocol("WM_DELETE_WINDOW", app.close_dashboard)
     root.mainloop()
 
 
