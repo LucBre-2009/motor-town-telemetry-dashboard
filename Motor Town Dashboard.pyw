@@ -860,27 +860,43 @@ class App:
         self.g_canvas.bind("<Configure>", lambda e: self.draw_g_meter())
         self.draw_g_meter()
 
-        dyn_panel, dyn_inner = self.rounded_panel(bottom, PANEL, 18, 3)
-        dyn_panel.pack(side="left", fill="both", expand=True, padx=(5, 0))
-        self.dynamics_values = {}
-        self.label(dyn_inner, "VEHICLE DYNAMICS", 11, TEXT, True, bg=PANEL).pack(anchor="w", padx=14, pady=(12, 3))
-        self.label(dyn_inner, "LIVE MOTION TELEMETRY", 7, MUTED, True, bg=PANEL).pack(anchor="w", padx=14, pady=(0, 7))
-        for title in ("LONGITUDINAL G", "LATERAL G", "YAW RATE", "PITCH / ROLL"):
-            row = tk.Frame(dyn_inner, bg=PANEL)
-            row.pack(fill="x", padx=14, pady=3)
-            self.label(row, title, 8, MUTED, True, bg=PANEL).pack(side="left")
-            value = self.label(row, "—", 10, TEXT, True, bg=PANEL)
-            value.pack(side="right")
-            self.dynamics_values[title] = value
+        # Bottom-right race timing panel.
+        race_panel, race_inner = self.rounded_panel(bottom, PANEL, 18, 3)
+        race_panel.pack(side="left", fill="both", expand=True, padx=(5, 0))
 
-        # Compact note area for telemetry limitations / upcoming features.
-        note = tk.Frame(dyn_inner, bg=PANEL2, highlightthickness=0, bd=0)
-        note.pack(fill="x", padx=14, pady=(14, 10))
-        self.label(note, "NOTE", 8, self.accent, True, bg=PANEL2).pack(anchor="w", padx=10, pady=(8, 2))
+        self.race_values = {}
+        self.label(race_inner, "RACE TIMING", 11, TEXT, True, bg=PANEL).pack(
+            anchor="w", padx=14, pady=(12, 3)
+        )
+        self.label(race_inner, "RACE DATA • WORK IN PROGRESS", 7, MUTED, True, bg=PANEL).pack(
+            anchor="w", padx=14, pady=(0, 7)
+        )
+
+        for title in ("TOTAL RACE TIME", "LAP TIME"):
+            row = tk.Frame(race_inner, bg=PANEL)
+            row.pack(fill="x", padx=14, pady=(2, 5))
+            self.label(row, title, 8, MUTED, True, bg=PANEL).pack(side="left")
+            value = self.label(row, "--:--.--", 16, TEXT, True, bg=PANEL)
+            value.pack(side="right")
+            self.race_values[title] = value
+
+        for title in ("CURRENT LAP", "LAP NUMBER", "BEST LAP", "RACE TIME"):
+            row = tk.Frame(race_inner, bg=PANEL)
+            row.pack(fill="x", padx=14, pady=2)
+            self.label(row, title, 8, MUTED, True, bg=PANEL).pack(side="left")
+            value = self.label(row, "--", 10, TEXT, True, bg=PANEL)
+            value.pack(side="right")
+            self.race_values[title] = value
+
+        note = tk.Frame(race_inner, bg=PANEL2, highlightthickness=0, bd=0)
+        note.pack(fill="x", padx=14, pady=(12, 10), side="bottom")
+        self.label(note, "WIP", 8, self.accent, True, bg=PANEL2).pack(
+            anchor="w", padx=10, pady=(8, 2)
+        )
         self.label(
             note,
-            "Some features are not yet supported by Motor Town's telemetry output.\n"
-            "More telemetry-dependent features can be added when the required data is available.",
+            "Lap and race timing are work in progress.\n"
+            "Native-v1 does not currently provide lap timing data.",
             8, MUTED, False, bg=PANEL2, justify="left"
         ).pack(anchor="w", padx=10, pady=(0, 9))
 
@@ -1281,7 +1297,7 @@ class App:
             ("GEAR", "The gear strip below the gauges shows the current gear and available forward/reverse positions."),
             ("VEHICLE INPUTS", "Throttle, Brake, Clutch, Steering and Fuel are shown across the middle of User Mode."),
             ("VEHICLE STATUS", "Handbrake, Headlights, ABS, TCS and Cruise Control (Autopilot is not supported by Motor Town yet) are shown in the status cards."),
-            ("G-FORCE", "The circular meter in Vehicle Dynamics shows lateral and longitudinal acceleration."),
+            ("G-FORCE", "The circular G-force meter shows lateral and longitudinal acceleration."),
             ("USER / EXPERT", "Use the buttons in the top-right to switch between the clean User Mode and detailed Expert Mode."),
             ("⚙ SETTINGS", "The clearly marked Settings button in the top-right opens telemetry connection, background, accent and speed-unit options."),
             ("YOU'RE READY", "Start Motor Town with Native-v1 telemetry enabled, then start driving. The dashboard will switch to LIVE automatically."),
@@ -1513,7 +1529,7 @@ class App:
             if not self._animating_g:
                 self._animating_g = True
                 self.root.after(0, self.animate_g_meter)
-            for v in self.dynamics_values.values():
+            for v in self.race_values.values():
                 v.config(text="—")
             return
 
@@ -1641,11 +1657,7 @@ class App:
             self._animating_g = True
             self.root.after(0, self.animate_g_meter)
 
-        self.dynamics_values["LONGITUDINAL G"].config(text=f"{longitudinal_g:+.2f} G")
-        self.dynamics_values["LATERAL G"].config(text=f"{lateral_g:+.2f} G")
-        self.dynamics_values["YAW RATE"].config(text=f"{data['yaw']:+.1f}°")
-        self.dynamics_values["PITCH / ROLL"].config(text=f"{data['pitch']:+.1f}° / {data['roll']:+.1f}°")
-
+        # G-force is displayed by the circular G meter.
         self.user_status.config(
             text="● TELEMETRY LIVE" if connected else "TELEMETRY PAUSED",
             fg=self.accent if connected else MUTED
