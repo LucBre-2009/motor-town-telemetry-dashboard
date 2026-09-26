@@ -142,6 +142,7 @@ APP_NAME = "Motor Town Telemetry"
 HOST = "127.0.0.1"
 PORT = 33330
 PACKET_SIZE = 153
+PACKET_SIZE_V11 = 849
 CONFIG_FILE = "motor_town_telemetry_config.json"
 
 # Native-v1 offsets
@@ -315,45 +316,62 @@ def quat_to_euler(x, y, z, w):
 
 
 def parse_packet(packet):
-    if len(packet) != PACKET_SIZE:
+    if len(packet) < PACKET_SIZE:
         return None
-
     try:
+        if packet[:4] != b"MTTM":
+            return None
+        major, minor, payload_size = packet[4], packet[5], struct.unpack_from("<H", packet, 6)[0]
+        if major != 1 or len(packet) != 8 + payload_size or payload_size < 145:
+            return None
         px, py, pz = struct.unpack_from("<3f", packet, 32)
         qx, qy, qz, qw = struct.unpack_from("<4f", packet, 44)
         wx, wy, wz = struct.unpack_from("<3f", packet, 60)
         lx, ly, lz = struct.unpack_from("<3f", packet, 72)
         ax, ay, az = struct.unpack_from("<3f", packet, 96)
-
         yaw, pitch, roll = quat_to_euler(qx, qy, qz, qw)
-
-        flags = read_uint(packet, 145)
-
-        return {
-            "position": (px, py, pz),
-            "rotation": (qx, qy, qz, qw),
-            "velocity_world": (wx, wy, wz),
-            "velocity_local": (lx, ly, lz),
-            "acceleration": (ax, ay, az),
-            "engine_rpm": read_float(packet, 108),
-            "engine_max_rpm": read_float(packet, 112),
-            "current_gear": read_int(packet, 116),
-            "max_forward_gear": read_int(packet, 120),
-            "speed_kmh": read_float(packet, 124),
-            "throttle": read_float(packet, 128),
-            "brake": read_float(packet, 132),
-            "clutch": read_float(packet, 136),
-            "steering": read_float(packet, 140),
-            "handbrake": read_bool(packet, 144),
-            "flags": flags,
-            "fuel_ratio": read_float(packet, 149),
-            "yaw": yaw,
-            "pitch": pitch,
-            "roll": roll,
-            "timestamp": time.time(),
-            "raw": packet,
-        }
-    except (struct.error, ValueError):
+        result = {"protocol": f"{major}.{minor}", "packet_size": len(packet),
+            "position": (px, py, pz), "rotation": (qx, qy, qz, qw),
+            "velocity_world": (wx, wy, wz), "velocity_local": (lx, ly, lz),
+            "acceleration": (ax, ay, az), "engine_rpm": read_float(packet,108),
+            "engine_max_rpm": read_float(packet,112), "current_gear": read_int(packet,116),
+            "max_forward_gear": read_int(packet,120), "speed_kmh": read_float(packet,124),
+            "throttle": read_float(packet,128), "brake": read_float(packet,132),
+            "clutch": read_float(packet,136), "steering": read_float(packet,140),
+            "handbrake": read_bool(packet,144), "flags": read_uint(packet,145),
+            "fuel_ratio": read_float(packet,149), "yaw": yaw, "pitch": pitch, "roll": roll,
+            "timestamp": time.time(), "raw": packet, "v11": False}
+        if payload_size >= 841 and len(packet) >= PACKET_SIZE_V11:
+            result["v11"] = True
+            result.update({
+                "flags2": read_uint(packet,153), "autopilot_mode": packet[157], "turn_signal": packet[158],
+                "transmission_type": packet[159], "fuel_type": packet[160], "mission_type": packet[161],
+                "weather": packet[162], "destination_kind": packet[163], "race_source": packet[164],
+                "num_reverse_gears": packet[165], "coolant_temp_c": read_float(packet,166),
+                "engine_torque_nm": read_float(packet,170), "engine_power_kw": read_float(packet,174),
+                "boost_bar": read_float(packet,178), "engine_damage": read_float(packet,182),
+                "current_gear_ratio": read_float(packet,186), "cruise_target_kmh": read_float(packet,190),
+                "speed_limiter_target_kmh": read_float(packet,194), "autopilot_max_speed_kmh": read_float(packet,198),
+                "fuel_amount": read_float(packet,202), "fuel_capacity": read_float(packet,206),
+                "fuel_rate_lph": read_float(packet,210), "fuel_economy_kpl": read_float(packet,214),
+                "ev_power_ratio": read_float(packet,218), "odometer_km": struct.unpack_from("<d",packet,222)[0],
+                "road_speed_limit_kmh": read_float(packet,230), "destination_distance_m": read_float(packet,234),
+                "gross_weight_kg": read_float(packet,238), "cargo_weight_kg": read_float(packet,242),
+                "race_elapsed_s": read_float(packet,246), "lap_time_s": read_float(packet,250),
+                "last_lap_s": read_float(packet,254), "best_lap_s": read_float(packet,258),
+                "lap_number": struct.unpack_from("<H",packet,262)[0], "total_laps": struct.unpack_from("<H",packet,264)[0],
+                "race_position": packet[266], "num_racers": packet[267], "section_index": struct.unpack_from("<h",packet,268)[0],
+                "section_count": struct.unpack_from("<h",packet,270)[0], "time_of_day_h": read_float(packet,272),
+                "air_temp_c": read_float(packet,276), "rain_strength": read_float(packet,280),
+                "money": struct.unpack_from("<q",packet,284)[0], "wheel_count": packet[292],
+                "vehicle_name_en": packet[753:817].split(b"\0",1)[0].decode("utf-8","replace"),
+                "vehicle_key": packet[817:849].split(b"\0",1)[0].decode("utf-8","replace")})
+            wheel_fmt = "<fffffffffffBB"; names=("angular_velocity_rad_s","slip_ratio","slip_angle_deg","suspension_travel_m","suspension_ratio","tire_temp_c","brake_temp_c","vertical_load_n","tire_damage","local_forward_m","local_right_m","surface","contact")
+            result["wheels"]=[]
+            for i in range(min(result["wheel_count"],10)):
+                result["wheels"].append(dict(zip(names,struct.unpack_from(wheel_fmt,packet,293+i*46))))
+        return result
+    except (struct.error, ValueError, UnicodeError):
         return None
 
 
@@ -411,7 +429,7 @@ class TelemetryReceiver:
                     self.bytes_received += len(packet)
                     self._rate_count += 1
 
-                    if len(packet) != PACKET_SIZE:
+                    if len(packet) not in (PACKET_SIZE, PACKET_SIZE_V11):
                         self.bad_packets += 1
                         continue
 
@@ -469,7 +487,7 @@ class App:
         self.g_history = []
         self.g_max = 2.0
         self.long_g_history = []
-        self._display_speed = 0.0
+        self._display_speed_value = 0.0
         self._display_rpm = 0.0
         self._target_speed = 0.0
         self._target_rpm = 0.0
@@ -706,6 +724,12 @@ class App:
         )
         self.close_button.pack(side="left", padx=(8, 0))
 
+        # Footer must reserve its 30px first; otherwise the expanding body can
+        # consume the available height and hide the footer on smaller displays.
+        footer = tk.Frame(self.root, bg=PANEL, height=30)
+        footer.pack(fill="x", side="bottom")
+        footer.pack_propagate(False)
+
         self.body = tk.Frame(self.root, bg=BG)
         self.body.pack(fill="both", expand=True)
 
@@ -714,13 +738,9 @@ class App:
         else:
             self.build_expert()
 
-        footer = tk.Frame(self.root, bg=PANEL, height=30)
-        footer.pack(fill="x", side="bottom")
-        footer.pack_propagate(False)
-
         self.footer_label = self.label(
             footer,
-            f"Native-v1  •  UDP {self.receiver.host}:{self.receiver.port}  •  153 bytes",
+            f"Native-v1 / v1.1  •  UDP {self.receiver.host}:{self.receiver.port}",
             8, MUTED, bg=PANEL
         )
         self.footer_label.pack(side="left", padx=18)
@@ -776,130 +796,58 @@ class App:
 
     def build_user(self):
         content = tk.Frame(self.body, bg=BG)
-        content.pack(fill="both", expand=True, padx=24, pady=6)
+        content.pack(fill="both", expand=True, padx=18, pady=4)
+        hero = tk.Frame(content, bg=BG, height=330); hero.pack(fill="x", pady=(0,4)); hero.pack_propagate(False)
+        self.speed_gauge=self.make_gauge(hero,"",0,240,self.speed_unit); self.speed_gauge.pack(side="left",fill="both",expand=True,padx=(0,6))
+        self.rpm_gauge=self.make_gauge(hero,"",0,10000,"RPM"); self.rpm_gauge.pack(side="left",fill="both",expand=True,padx=(6,0))
 
-        # Large primary instruments.
-        hero = tk.Frame(content, bg=BG, height=285)
-        hero.pack(fill="x", pady=(0, 5))
-        hero.pack_propagate(False)
-        self.speed_gauge = self.make_gauge(hero, "", 0, 240, self.speed_unit)
-        self.speed_gauge.pack(side="left", fill="both", expand=True, padx=(0, 6))
-        self.rpm_gauge = self.make_gauge(hero, "", 0, 10000, "RPM")
-        self.rpm_gauge.pack(side="left", fill="both", expand=True, padx=(6, 0))
+        telemetry=tk.Frame(content,bg=BG,height=130); telemetry.pack(fill="x",pady=(0,4)); telemetry.pack_propagate(False)
+        telemetry.grid_columnconfigure(0,weight=3); telemetry.grid_columnconfigure(1,weight=5); telemetry.grid_columnconfigure(2,weight=3); telemetry.grid_rowconfigure(0,weight=1)
+        self.v11_left_values={}; self.v11_right_values={}
+        lp,li=self.rounded_panel(telemetry,PANEL,14,2); lp.grid(row=0,column=0,sticky="nsew",padx=(0,3))
+        self.label(li,"VEHICLE / ENGINE",7,MUTED,True,bg=PANEL).pack(anchor="w",padx=6,pady=(2,0))
+        for title in ("VEHICLE","COOLANT","TORQUE","POWER","BOOST","DAMAGE","TIRE TEMP","BRAKE TEMP"):
+            row=tk.Frame(li,bg=PANEL); row.pack(fill="x",padx=6,pady=0); self.label(row,title,7,MUTED,True,bg=PANEL).pack(side="left"); v=self.label(row,"—",9,TEXT,True,bg=PANEL); v.pack(side="right"); self.v11_left_values[title]=v
 
-        # Compact transmission selector. It supports up to 3 reverse gears and
-        # 18 forward gears; the packet exposes the gears as integer positions.
-        telemetry = tk.Frame(content, bg=BG, height=72)
-        telemetry.pack(fill="x", pady=(0, 8))
-        telemetry.pack_propagate(False)
+        gear_wrap=tk.Frame(telemetry,bg=BG); gear_wrap.grid(row=0,column=1,sticky="nsew",padx=3)
+        gear_center=tk.Frame(gear_wrap,bg=BG); gear_center.place(relx=.5,rely=.48,anchor="center")
+        self.label(gear_center,"GEAR",7,MUTED,True,bg=BG).grid(row=0,column=0,rowspan=2,padx=(0,5))
+        self.gear_neutral=tk.Label(gear_center,text="N",bg=PANEL2,fg=MUTED,font=("Segoe UI",10,"bold"),width=3,height=1,relief="flat",bd=0,padx=1,pady=1); self.gear_neutral.grid(row=0,column=1,padx=2)
+        self.gear_reverse_boxes={}
+        for idx in range(1,4):
+            box=tk.Label(gear_center,text=("R" if idx==1 else f"R{idx}"),bg=PANEL2,fg=MUTED,font=("Segoe UI",9,"bold"),width=3,height=1,relief="flat",bd=0,padx=1,pady=1); box.grid(row=0,column=1+idx,padx=2); self.gear_reverse_boxes[idx]=box
+            if idx>1: box.grid_remove()
+        self.gear_boxes={}
+        for gear in range(1,19):
+            box=tk.Label(gear_center,text=str(gear),bg=PANEL2,fg=MUTED,font=("Segoe UI",8,"bold"),width=3,height=1,relief="flat",bd=0,padx=1,pady=1); box.grid(row=1,column=gear,padx=1,pady=(3,0)); self.gear_boxes[gear]=box
+        self.user_status=self.label(gear_wrap,"WAITING FOR TELEMETRY",7,MUTED,True,bg=BG); self.user_status.place(relx=.5,rely=.95,anchor="center")
 
-        gear_wrap = tk.Frame(telemetry, bg=BG)
-        gear_wrap.pack(expand=True)
-        self.label(gear_wrap, "GEAR", 7, MUTED, True, bg=BG).grid(row=0, column=0, rowspan=2, padx=(0, 10))
+        rp,ri=self.rounded_panel(telemetry,PANEL,14,2); rp.grid(row=0,column=2,sticky="nsew",padx=(3,0))
+        self.label(ri,"FUEL / ROAD / RACE",7,MUTED,True,bg=PANEL).pack(anchor="w",padx=6,pady=(2,0))
+        for title in ("FUEL","DESTINATION","ROAD LIMIT","ODOMETER","WEATHER","AIR TEMP","FUEL RATE"):
+            row=tk.Frame(ri,bg=PANEL); row.pack(fill="x",padx=6,pady=0); self.label(row,title,7,MUTED,True,bg=PANEL).pack(side="left"); v=self.label(row,"—",9,TEXT,True,bg=PANEL); v.pack(side="right"); self.v11_right_values[title]=v
 
-        self.gear_neutral = tk.Label(gear_wrap, text="N", bg=PANEL2, fg=MUTED,
-                                     font=("Segoe UI", 10, "bold"), width=3, height=1,
-                                     relief="flat", bd=0, padx=2, pady=4)
-        self.gear_neutral.grid(row=0, column=1, padx=2)
+        flags_row=tk.Frame(content,bg=BG,height=44); flags_row.pack(fill="x",pady=(0,4)); flags_row.pack_propagate(False); self.user_flags={}
+        for title in ("HANDBRAKE","LIGHTS","ABS","TCS","CRUISE / AUTOPILOT"):
+            panel,frame=self.rounded_panel(flags_row,PANEL,14,2); panel.pack(side="left",fill="both",expand=True,padx=3); self.label(frame,title,6,MUTED,True,bg=PANEL).pack(pady=(4,0)); val=self.label(frame,"—",8,TEXT,True,bg=PANEL); val.pack(pady=(1,0)); self.user_flags[title]=val
 
-        self.gear_reverse_boxes = {}
-        for idx in range(1, 4):
-            box = tk.Label(gear_wrap, text=("R" if idx == 1 else f"R{idx}"), bg=PANEL2, fg=MUTED,
-                           font=("Segoe UI", 9, "bold"), width=3, height=1,
-                           relief="flat", bd=0, padx=2, pady=4)
-            box.grid(row=0, column=1 + idx, padx=2)
-            self.gear_reverse_boxes[idx] = box
-            if idx > 1:
-                box.grid_remove()
+        cards=tk.Frame(content,bg=BG,height=44); cards.pack(fill="x",pady=(0,4)); cards.pack_propagate(False); self.user_cards={}
+        for title in ("THROTTLE","BRAKE","CLUTCH","STEERING","FUEL"):
+            panel,frame=self.rounded_panel(cards,PANEL,14,2); panel.pack(side="left",fill="both",expand=True,padx=3); self.label(frame,title,6,MUTED,True,bg=PANEL).pack(pady=(3,0)); val=self.label(frame,"—",14,TEXT,True,bg=PANEL); val.pack(pady=(1,0)); self.user_cards[title]=val
 
-        self.gear_boxes = {}
-        for gear in range(1, 19):
-            box = tk.Label(gear_wrap, text=str(gear), bg=PANEL2, fg=MUTED,
-                           font=("Segoe UI", 9, "bold"), width=3, height=1,
-                           relief="flat", bd=0, padx=2, pady=3)
-            box.grid(row=1, column=gear, padx=2, pady=(4, 0))
-            self.gear_boxes[gear] = box
+        bottom=tk.Frame(content,bg=BG,height=305); bottom.pack(fill="both",expand=True); bottom.pack_propagate(False)
+        gp,gi=self.rounded_panel(bottom,PANEL,18,3); gp.pack(side="left",fill="both",expand=True,padx=(0,5)); self.g_canvas=tk.Canvas(gi,bg=PANEL,highlightthickness=0,bd=0); self.g_canvas.pack(fill="both",expand=True,padx=5,pady=5); self.g_canvas.bind("<Configure>",lambda e:self.draw_g_meter()); self.draw_g_meter()
+        rp,ri=self.rounded_panel(bottom,PANEL,18,3); rp.pack(side="left",fill="both",expand=True,padx=(5,0)); self.race_values={}; self.label(ri,"RACE TIMING",11,TEXT,True,bg=PANEL).pack(anchor="w",padx=14,pady=(8,2)); self.label(ri,"NATIVE-v1.1",7,MUTED,True,bg=PANEL).pack(anchor="w",padx=14,pady=(0,3))
+        for title in ("TOTAL RACE TIME","LAP TIME","LAST LAP","BEST LAP"):
+            row=tk.Frame(ri,bg=PANEL); row.pack(fill="x",padx=14,pady=0); self.label(row,title,6,MUTED,True,bg=PANEL).pack(side="left"); v=self.label(row,"--:--.--",11,TEXT,True,bg=PANEL); v.pack(side="right"); self.race_values[title]=v
+        for title in ("LAP","LAPS","POSITION","RACERS","CHECKPOINT"):
+            row=tk.Frame(ri,bg=PANEL); row.pack(fill="x",padx=14,pady=0); self.label(row,title,6,MUTED,True,bg=PANEL).pack(side="left"); v=self.label(row,"—",8,TEXT,True,bg=PANEL); v.pack(side="right"); self.race_values[title]=v
 
-        self.user_status = self.label(telemetry, "WAITING FOR TELEMETRY", 8, MUTED, True, bg=BG)
-        self.user_status.place(relx=1.0, rely=0.5, anchor="e", x=-6)
-
-        # Flags use the same compact card language as the control cards.
-        flags_row = tk.Frame(content, bg=BG, height=62)
-        flags_row.pack(fill="x", pady=(0, 7))
-        flags_row.pack_propagate(False)
-        self.user_flags = {}
-        for title in ("HANDBRAKE", "LIGHTS", "ABS", "TCS", "CRUISE", "AUTOPILOT"):
-            panel, frame = self.rounded_panel(flags_row, PANEL, 14, 2)
-            panel.pack(side="left", fill="both", expand=True, padx=3)
-            self.label(frame, title, 7, MUTED, True, bg=PANEL).pack(pady=(8, 0))
-            val = self.label(frame, "—", 10, TEXT, True, bg=PANEL)
-            val.pack(pady=(3, 0))
-            self.user_flags[title] = val
-
-        cards = tk.Frame(content, bg=BG, height=68)
-        cards.pack(fill="x", pady=(0, 8))
-        cards.pack_propagate(False)
-        self.user_cards = {}
-        for title in ("THROTTLE", "BRAKE", "CLUTCH", "STEERING", "FUEL"):
-            panel, frame = self.rounded_panel(cards, PANEL, 14, 2)
-            panel.pack(side="left", fill="both", expand=True, padx=3)
-            self.label(frame, title, 7, MUTED, True, bg=PANEL).pack(pady=(8, 0))
-            val = self.label(frame, "—", 17, TEXT, True, bg=PANEL)
-            val.pack(pady=(4, 0))
-            self.user_cards[title] = val
-
-        # Bottom area: larger, fully visible G-ball plus a clean dynamics card.
-        bottom = tk.Frame(content, bg=BG, height=220)
-        bottom.pack(fill="both", expand=True)
-        bottom.pack_propagate(False)
-
-        g_panel, g_inner = self.rounded_panel(bottom, PANEL, 18, 3)
-        g_panel.pack(side="left", fill="both", expand=True, padx=(0, 5))
-        self.g_canvas = tk.Canvas(g_inner, bg=PANEL, highlightthickness=0, bd=0)
-        self.g_canvas.pack(fill="both", expand=True, padx=5, pady=5)
-        self.g_canvas.bind("<Configure>", lambda e: self.draw_g_meter())
-        self.draw_g_meter()
-
-        # Bottom-right race timing panel.
-        race_panel, race_inner = self.rounded_panel(bottom, PANEL, 18, 3)
-        race_panel.pack(side="left", fill="both", expand=True, padx=(5, 0))
-
-        self.race_values = {}
-        self.label(race_inner, "RACE TIMING", 11, TEXT, True, bg=PANEL).pack(
-            anchor="w", padx=14, pady=(12, 3)
-        )
-        self.label(race_inner, "RACE DATA • WORK IN PROGRESS", 7, MUTED, True, bg=PANEL).pack(
-            anchor="w", padx=14, pady=(0, 7)
-        )
-
-        for title in ("TOTAL RACE TIME", "LAP TIME"):
-            row = tk.Frame(race_inner, bg=PANEL)
-            row.pack(fill="x", padx=14, pady=(2, 5))
-            self.label(row, title, 8, MUTED, True, bg=PANEL).pack(side="left")
-            value = self.label(row, "--:--.--", 16, TEXT, True, bg=PANEL)
-            value.pack(side="right")
-            self.race_values[title] = value
-
-        for title in ("CURRENT LAP", "LAP NUMBER", "BEST LAP", "RACE TIME"):
-            row = tk.Frame(race_inner, bg=PANEL)
-            row.pack(fill="x", padx=14, pady=2)
-            self.label(row, title, 8, MUTED, True, bg=PANEL).pack(side="left")
-            value = self.label(row, "--", 10, TEXT, True, bg=PANEL)
-            value.pack(side="right")
-            self.race_values[title] = value
-
-        note = tk.Frame(race_inner, bg=PANEL2, highlightthickness=0, bd=0)
-        note.pack(fill="x", padx=14, pady=(12, 10), side="bottom")
-        self.label(note, "WIP", 8, self.accent, True, bg=PANEL2).pack(
-            anchor="w", padx=10, pady=(8, 2)
-        )
-        self.label(
-            note,
-            "Lap and race timing are work in progress.\n"
-            "Native-v1 does not currently provide lap timing data.",
-            8, MUTED, False, bg=PANEL2, justify="left"
-        ).pack(anchor="w", padx=10, pady=(0, 9))
-
+    def _format_time(self, seconds):
+        try: seconds=max(0.0,float(seconds))
+        except (TypeError,ValueError): return "--:--.--"
+        minutes,sec=divmod(seconds,60.0); hours,minutes=divmod(int(minutes),60)
+        return f"{hours:02d}:{minutes:02d}:{sec:05.2f}" if hours else f"{minutes:02d}:{sec:05.2f}"
     def make_gauge(self, parent, title, minimum, maximum, unit):
         outer, frame = self.rounded_panel(parent, PANEL, 18, 2)
         canvas = tk.Canvas(frame, bg=PANEL, highlightthickness=0, bd=0, height=300)
@@ -913,6 +861,21 @@ class App:
         canvas.bind("<Configure>", lambda e, f=outer: self.draw_gauge(f))
         self.draw_gauge(outer)
         return outer
+
+    def _normalize_rpm_max(self, value):
+        try: value=float(value)
+        except (TypeError,ValueError): return 10000.0
+        return 10000.0 if value <= 0 else value + 500.0
+
+    def _update_rpm_gauge_max(self, engine_max_rpm):
+        if not hasattr(self,"rpm_gauge"): return
+        new_max=self._normalize_rpm_max(engine_max_rpm)
+        if self.rpm_gauge._gauge_max != new_max:
+            self.rpm_gauge._gauge_max=new_max
+            self.rpm_gauge._gauge_value=min(self.rpm_gauge._gauge_value,new_max)
+            self._target_rpm=min(self._target_rpm,new_max)
+            self._display_rpm=min(self._display_rpm,new_max)
+            self.draw_gauge(self.rpm_gauge)
 
     def draw_gauge(self, frame):
         c = frame._gauge_canvas
@@ -982,7 +945,7 @@ class App:
             return
 
         for gauge, attr, target in (
-            (self.speed_gauge, "_display_speed", self._target_speed),
+            (self.speed_gauge, "_display_speed_value", self._target_speed),
             (self.rpm_gauge, "_display_rpm", self._target_rpm),
         ):
             current = getattr(self, attr)
@@ -1036,7 +999,7 @@ class App:
         cx, cy = w * 0.5, h * 0.53
         # Keep the complete instrument inside the card while making it as
         # large as the available height allows.
-        radius = min(w * 0.34, h * 0.34)
+        radius = min(w * 0.38, h * 0.38)
 
         c.create_text(16, 10, anchor="nw", text="G-FORCE",
                       fill=TEXT, font=("Segoe UI", 11, "bold"))
@@ -1070,11 +1033,12 @@ class App:
         c.create_text(cx+radius+28, cy, text="RIGHT", fill=MUTED,
                       font=("Segoe UI", 7, "bold"))
 
-        # Local X = lateral, local Z = longitudinal. The longitudinal sign is
-        # inverted so acceleration sends the ball backward and braking forward,
-        # matching the behavior of a real vehicle-mounted G-meter.
-        lateral = self._display_lateral_g
-        longitudinal = self._display_longitudinal_g
+        # The two axes are completely independent:
+        #   X-axis on the meter = lateral acceleration (vehicle-local Y)
+        #   Y-axis on the meter = longitudinal acceleration (vehicle-local X)
+        # No value is derived from or mixed with the other axis.
+        lateral = float(self._display_lateral_g)
+        longitudinal = float(self._display_longitudinal_g)
         lateral = max(-self.g_max, min(self.g_max, lateral))
         longitudinal = max(-self.g_max, min(self.g_max, longitudinal))
         px = cx + (lateral / self.g_max) * radius * 0.72
@@ -1119,7 +1083,7 @@ class App:
         self.expert_nav = {}
         for name in [
             "Overview", "Engine", "Movement", "Controls",
-            "Position", "Flags", "Raw Data"
+            "Position", "Flags", "Native v1.1", "Raw Data"
         ]:
             b = self.button(
                 left, name, lambda n=name: self.set_page(n),
@@ -1295,9 +1259,9 @@ class App:
             ("WELCOME", "This quick tour shows you where the important dashboard controls are."),
             ("SPEED & RPM", "The two large gauges at the top show your current vehicle speed and engine RPM."),
             ("GEAR", "The gear strip below the gauges shows the current gear and available forward/reverse positions."),
-            ("VEHICLE INPUTS", "Throttle, Brake, Clutch, Steering and Fuel are shown across the middle of User Mode."),
-            ("VEHICLE STATUS", "Handbrake, Headlights, ABS, TCS and Cruise Control (Autopilot is not supported by Motor Town yet) are shown in the status cards."),
-            ("G-FORCE", "The circular G-force meter shows lateral and longitudinal acceleration."),
+            ("VEHICLE INPUTS", "Throttle, brake, clutch, steering and fuel are shown across the middle of User Mode."),
+            ("VEHICLE STATUS", "Reverse, lights, ABS, TCS, cruise control and handbrake states are shown in the status cards."),
+            ("G-FORCE", "The circular meter in Vehicle Dynamics shows lateral and longitudinal acceleration."),
             ("USER / EXPERT", "Use the buttons in the top-right to switch between the clean User Mode and detailed Expert Mode."),
             ("⚙ SETTINGS", "The clearly marked Settings button in the top-right opens telemetry connection, background, accent and speed-unit options."),
             ("YOU'RE READY", "Start Motor Town with Native-v1 telemetry enabled, then start driving. The dashboard will switch to LIVE automatically."),
@@ -1410,7 +1374,7 @@ class App:
             "LIGHTS": bool(flags & 0x08),
             "ABS": bool(flags & 0x10),
             "TCS": bool(flags & 0x20),
-            "CRUISE": bool(flags & 0x40),
+            "CRUISE / AUTOPILOT": bool(flags & 0x40),
         }
 
         # Slow the gauge animation down during the sweep so it feels like a
@@ -1466,14 +1430,14 @@ class App:
         # Return to the live telemetry values after the complete sweep.
         data = self.receiver.snapshot()
         if data:
-            speed = data["speed_kmh"] if self.speed_unit == "km/h" else data["speed_kmh"] * 0.621371
+            speed = self._display_speed(data["speed_kmh"])
             self._target_speed = speed
             self._target_rpm = data["engine_rpm"]
 
     def update_ui(self):
         if hasattr(self, "footer_label"):
             self.footer_label.config(
-                text=f"Native-v1  •  UDP {self.receiver.host}:{self.receiver.port}  •  153 bytes"
+                text=f"Native-v1 / v1.1  •  UDP {self.receiver.host}:{self.receiver.port}"
             )
         data = self.receiver.snapshot()
 
@@ -1494,174 +1458,135 @@ class App:
 
         self.root.after(100, self.update_ui)
 
+    # Display-unit conversions. Telemetry stays in native metric units internally;
+    # only the displayed values change when the user selects mph.
+    @property
+    def _imperial_units(self):
+        return self.speed_unit == "mph"
+
+    def _display_speed(self, kmh):
+        return float(kmh) * 0.62137119223733 if self._imperial_units else float(kmh)
+
+    def _display_distance_km(self, km):
+        return float(km) * 0.62137119223733 if self._imperial_units else float(km)
+
+    def _display_distance_m(self, meters):
+        return float(meters) * 0.00062137119223733 if self._imperial_units else float(meters)
+
+    def _display_fuel_amount(self, liters):
+        return float(liters) * 0.26417205235815 if self._imperial_units else float(liters)
+
+    def _display_fuel_economy(self, km_per_unit, fuel_type):
+        # Conventional fuel: km/L -> US mpg. EV: km/kWh -> mi/kWh.
+        if fuel_type == 3:
+            return float(km_per_unit) * 0.62137119223733
+        return float(km_per_unit) * 2.35214583333333 if self._imperial_units else float(km_per_unit)
+
+    def _fuel_amount_unit(self, fuel_type):
+        if fuel_type == 3:
+            return "kWh"
+        return "gal" if self._imperial_units else "L"
+
+    def _fuel_economy_unit(self, fuel_type):
+        if fuel_type == 3:
+            return "mi/kWh" if self._imperial_units else "km/kWh"
+        return "mpg" if self._imperial_units else "km/L"
+
+    def _display_fuel_rate(self, liters_per_hour, fuel_type):
+        if fuel_type == 3:
+            return float(liters_per_hour)
+        return float(liters_per_hour) * 0.26417205235815 if self._imperial_units else float(liters_per_hour)
+
+    def _fuel_rate_unit(self, fuel_type):
+        if fuel_type == 3:
+            return "kWh/h"
+        return "gal/h" if self._imperial_units else "L/h"
+
     def update_user(self, data, connected):
-        if not hasattr(self, "speed_gauge"):
-            return
-
+        if not hasattr(self,"speed_gauge"): return
         if not data:
-            self._observed_reverse_gears = 1
-            self._last_vehicle_signature = None
-            self._last_vehicle_position = None
-            self._last_vehicle_timestamp = None
-            self._target_speed = 0.0
-            self._target_rpm = 0.0
-            self._engine_was_running = False
-            if self._self_check_active:
-                self._self_check_active = False
-                self._self_check_after_id = None
-            if not self._animating_gauge:
-                self._animating_gauge = True
-                self.root.after(0, self.animate_gauges)
-            for box in self.gear_boxes.values():
-                box.config(bg=PANEL2, fg=MUTED)
-            for box in self.gear_reverse_boxes.values():
-                box.config(bg=PANEL2, fg=MUTED)
-            self.gear_neutral.config(bg=PANEL2, fg=MUTED)
-            for v in self.user_cards.values():
-                v.config(text="—")
-            for v in self.user_flags.values():
-                v.config(text="—", fg=TEXT)
-            self.user_status.config(text="WAITING FOR TELEMETRY", fg=MUTED)
-            self._target_lateral_g = 0.0
-            self._target_longitudinal_g = 0.0
-            self.g_history.clear()
-            self.long_g_history.clear()
-            if not self._animating_g:
-                self._animating_g = True
-                self.root.after(0, self.animate_g_meter)
-            for v in self.race_values.values():
-                v.config(text="—")
-            return
-
-        speed_kmh = data["speed_kmh"]
-        speed = speed_kmh if self.speed_unit == "km/h" else speed_kmh * 0.621371
-        max_speed = 240 if self.speed_unit == "km/h" else 150
-        self.speed_gauge._gauge_max = max_speed
-        self.speed_gauge._gauge_unit = self.speed_unit
-
-        # The self-check belongs to dashboard startup, not to an RPM transition.
-        # It is triggered once when the first valid telemetry packet arrives.
-        if not self._startup_self_check_done:
-            self.start_self_check(data)
-
-        if not self._self_check_active:
-            self._target_speed = speed
-            self._target_rpm = data["engine_rpm"]
-        if not self._animating_gauge:
-            self._animating_gauge = True
-            self.root.after(0, self.animate_gauges)
-
-        current_gear = int(data["current_gear"])
-        max_gear = max(0, min(18, int(data["max_forward_gear"])))
-        reverse_active = bool(data["flags"] & 0x04) or current_gear < 0
-
-        # Reverse-gear discovery is vehicle-specific. Native-v1 does not
-        # provide a reverse-count field, so reset the learned count whenever
-        # the telemetry indicates that the current vehicle has disappeared,
-        # the transmission signature changes, or the vehicle teleports/spawns
-        # at a new location. This prevents R2/R3 from leaking into a new car.
-        vehicle_present = bool(data["flags"] & 0x02)
-        signature = (max_gear, round(float(data["engine_max_rpm"]), 1))
-        pos = data["position"]
-        reset_reverse = not vehicle_present
-        if self._last_vehicle_signature is not None and signature != self._last_vehicle_signature:
-            reset_reverse = True
+            self._observed_reverse_gears=1; self._last_vehicle_signature=None; self._last_vehicle_position=None; self._last_vehicle_timestamp=None; self._target_speed=0.0; self._target_rpm=0.0; self._engine_was_running=False
+            for box in self.gear_boxes.values(): box.config(bg=PANEL2,fg=MUTED)
+            for box in self.gear_reverse_boxes.values(): box.config(bg=PANEL2,fg=MUTED)
+            self.gear_neutral.config(bg=PANEL2,fg=MUTED)
+            for v in self.user_cards.values(): v.config(text="—")
+            for v in self.user_flags.values(): v.config(text="—",fg=TEXT)
+            for v in self.v11_left_values.values(): v.config(text="—")
+            for v in self.v11_right_values.values(): v.config(text="—")
+            for k,v in self.race_values.items(): v.config(text="--:--.--" if k in ("TOTAL RACE TIME","LAP TIME","LAST LAP","BEST LAP") else "—")
+            self.user_status.config(text="WAITING FOR TELEMETRY",fg=MUTED); self._target_lateral_g=0.0; self._target_longitudinal_g=0.0; self.g_history.clear(); self.long_g_history.clear(); return
+        speed=self._display_speed(data["speed_kmh"]); self.speed_gauge._gauge_max=240 if self.speed_unit=="km/h" else 150; self.speed_gauge._gauge_unit=self.speed_unit
+        if not self._startup_self_check_done: self.start_self_check(data)
+        if not self._self_check_active: self._target_speed=speed; self._target_rpm=data["engine_rpm"]
+        if not self._animating_gauge: self._animating_gauge=True; self.root.after(0,self.animate_gauges)
+        current_gear=int(data["current_gear"]); max_gear=max(0,min(18,int(data["max_forward_gear"]))); reverse_active=bool(data["flags"]&0x04) or current_gear<0
+        sig=(max_gear,round(float(data["engine_max_rpm"]),1),int(data.get("num_reverse_gears",1))); pos=data["position"]; reset=not bool(data["flags"]&0x02) or (self._last_vehicle_signature is not None and sig!=self._last_vehicle_signature)
         if self._last_vehicle_position is not None:
-            dx = pos[0] - self._last_vehicle_position[0]
-            dy = pos[1] - self._last_vehicle_position[1]
-            dz = pos[2] - self._last_vehicle_position[2]
-            # Position is in centimetres. A large jump is a strong spawn/
-            # vehicle-switch signal and is not normal driving movement.
-            if math.sqrt(dx*dx + dy*dy + dz*dz) > 1500.0:
-                reset_reverse = True
-        if reset_reverse:
-            self._observed_reverse_gears = 1
-        self._last_vehicle_signature = signature
-        self._last_vehicle_position = pos
-        self._last_vehicle_timestamp = data["timestamp"]
-
-        for gear, box in self.gear_boxes.items():
-            if gear <= max_gear:
-                box.config(bg=self.accent if current_gear == gear else PANEL2,
-                           fg="#ffffff" if current_gear == gear else MUTED)
-            else:
-                box.config(bg=BG, fg="#334155")
-
-        self.gear_neutral.config(
-            bg=self.accent if current_gear == 0 and not reverse_active else PANEL2,
-            fg="#ffffff" if current_gear == 0 and not reverse_active else MUTED
-        )
-
-        # Native-v1 has no "maximum reverse gear" field. The only reliable
-        # discovery signal is the negative current_gear value itself.
-        # Therefore R2/R3 can be revealed automatically as soon as the game
-        # reports -2/-3; before that, showing them as available would be a
-        # guess. R1 is displayed simply as "R" for a one-reverse transmission.
-        if current_gear < 0:
-            self._observed_reverse_gears = max(
-                self._observed_reverse_gears,
-                min(3, abs(current_gear))
-            )
-
-        reverse_count = max(1, min(3, self._observed_reverse_gears))
-        for rev, box in self.gear_reverse_boxes.items():
-            # Do not reserve/show undiscovered reverse gears. This prevents
-            # R2/R3 from looking available on a vehicle that only has R.
-            if rev > reverse_count:
-                box.grid_remove()
-                continue
-            if rev > 1:
-                box.grid()
-
-            box.config(text="R" if reverse_count == 1 and rev == 1 else f"R{rev}")
-            active = reverse_active and rev == (abs(current_gear) if current_gear < 0 else 1)
-            box.config(bg=self.accent if active else PANEL2,
-                       fg="#ffffff" if active else MUTED)
-        self.user_cards["THROTTLE"].config(text=f"{data['throttle']*100:.0f}%")
-        self.user_cards["BRAKE"].config(text=f"{data['brake']*100:.0f}%")
-        self.user_cards["CLUTCH"].config(text=f"{data['clutch']*100:.0f}%")
-        self.user_cards["STEERING"].config(text=f"{data['steering']*100:+.0f}%")
-        self.user_cards["FUEL"].config(text=f"{data['fuel_ratio']*100:.0f}%")
-
-        flags = data["flags"]
-        states = {
-            "HANDBRAKE": data["handbrake"],
-            "LIGHTS": bool(flags & 0x08),
-            "ABS": bool(flags & 0x10),
-            "TCS": bool(flags & 0x20),
-            "CRUISE": bool(flags & 0x40),
-        }
-        for name, active in states.items():
-            display_text = "ACTIVE" if active else "OFF"
-            self.user_flags[name].config(
-                text=display_text,
-                fg=self.accent if active else MUTED
-            )
-
-        # Native-v1 does not currently expose a separate Autopilot state.
-        # Keep the User Mode card visible and explicitly mark it as WIP
-        # rather than incorrectly treating Cruise Control as Autopilot.
-        self.user_flags["AUTOPILOT"].config(text="WORK IN PROGRESS", fg=MUTED)
-
-        # Native-v1 local vehicle axes:
-        # X = left/right, Y = vertical, Z = fore/aft.
-        # Use X for the lateral G meter so bumps/hills on the vertical Y axis
-        # do not incorrectly move the ball left/right.
-        # Native-v1 local acceleration: X is fore/aft and Z is lateral.
-        # Keep the display orientation with braking UP and acceleration DOWN.
-        longitudinal_g = -data["acceleration"][0] / 980.665
-        lateral_g = -data["acceleration"][1] / 980.665
-        self._target_lateral_g = lateral_g
+            dx=pos[0]-self._last_vehicle_position[0]; dy=pos[1]-self._last_vehicle_position[1]; dz=pos[2]-self._last_vehicle_position[2]; reset=reset or math.sqrt(dx*dx+dy*dy+dz*dz)>1500
+        if reset: self._observed_reverse_gears=1
+        self._last_vehicle_signature=sig; self._last_vehicle_position=pos; self._last_vehicle_timestamp=data["timestamp"]
+        self._observed_reverse_gears=max(1,min(3,int(data.get("num_reverse_gears",1)))) if data.get("v11") else max(self._observed_reverse_gears,min(3,abs(current_gear)) if current_gear<0 else 1)
+        for gear,box in self.gear_boxes.items(): box.config(bg=self.accent if gear<=max_gear and current_gear==gear else PANEL2 if gear<=max_gear else BG,fg="#ffffff" if gear<=max_gear and current_gear==gear else MUTED if gear<=max_gear else "#334155")
+        self.gear_neutral.config(bg=self.accent if current_gear==0 and not reverse_active else PANEL2,fg="#ffffff" if current_gear==0 and not reverse_active else MUTED)
+        rc=max(1,min(3,self._observed_reverse_gears))
+        for rev,box in self.gear_reverse_boxes.items():
+            if rev>rc: box.grid_remove(); continue
+            if rev>1: box.grid()
+            box.config(text="R" if rc==1 and rev==1 else f"R{rev}",bg=self.accent if reverse_active and rev==(abs(current_gear) if current_gear<0 else 1) else PANEL2,fg="#ffffff" if reverse_active and rev==(abs(current_gear) if current_gear<0 else 1) else MUTED)
+        self._update_rpm_gauge_max(data.get("engine_max_rpm",0.0))
+        for k,fmt in (("THROTTLE",f"{data['throttle']*100:.0f}%"),("BRAKE",f"{data['brake']*100:.0f}%"),("CLUTCH",f"{data['clutch']*100:.0f}%"),("STEERING",f"{data['steering']*100:+.0f}%")): self.user_cards[k].config(text=fmt)
+        if data.get("v11"):
+            fuel_type = int(data.get("fuel_type", 0))
+            fu = self._fuel_amount_unit(fuel_type)
+            econ_unit = self._fuel_economy_unit(fuel_type)
+            amount = self._display_fuel_amount(data.get("fuel_amount", 0.0)) if fuel_type != 3 else float(data.get("fuel_amount", 0.0))
+            econ = self._display_fuel_economy(data.get("fuel_economy_kpl", 0.0), fuel_type)
+            self.user_cards["FUEL"].config(text=f"{amount:.1f} {fu}  •  {econ:.2f} {econ_unit}")
+        else:
+            self.user_cards["FUEL"].config(text=f"{data['fuel_ratio']*100:.0f}%")
+        flags=data["flags"]
+        for k,a in {"HANDBRAKE":data["handbrake"],"LIGHTS":bool(flags&8),"ABS":bool(flags&16),"TCS":bool(flags&32)}.items(): self.user_flags[k].config(text="ACTIVE" if a else "OFF",fg=self.accent if a else MUTED)
+        am=int(data.get("autopilot_mode",0)) if data.get("v11") else (1 if flags&64 else 0)
+        if am==2: title="AUTOPILOT"; state="ACTIVE" if data.get("flags2",0)&2 else "SELECTED"
+        elif am==1: title="CRUISE CONTROL"; state="ACTIVE" if flags&64 else "OFF"
+        else: title="CRUISE CONTROL"; state="OFF"
+        self.user_flags["CRUISE / AUTOPILOT"].config(text=f"{title}: {state}",fg=self.accent if state in ("ACTIVE","SELECTED") else MUTED)
+        try:
+            longitudinal_g = -float(data["acceleration"][0]) / 980.665
+            lateral_g = -float(data["acceleration"][1]) / 980.665
+        except (TypeError, ValueError, IndexError):
+            longitudinal_g = 0.0
+            lateral_g = 0.0
+        if not math.isfinite(longitudinal_g): longitudinal_g = 0.0
+        if not math.isfinite(lateral_g): lateral_g = 0.0
         self._target_longitudinal_g = longitudinal_g
-        if not self._animating_g:
-            self._animating_g = True
-            self.root.after(0, self.animate_g_meter)
-
-        # G-force is displayed by the circular G meter.
-        self.user_status.config(
-            text="● TELEMETRY LIVE" if connected else "TELEMETRY PAUSED",
-            fg=self.accent if connected else MUTED
-        )
+        self._target_lateral_g = lateral_g
+        if not self._animating_g: self._animating_g=True; self.root.after(0,self.animate_g_meter)
+        if data.get("v11"):
+            self.v11_left_values["VEHICLE"].config(text=(data.get("vehicle_name_en") or "Unknown")[:22]); self.v11_left_values["COOLANT"].config(text=f"{data['coolant_temp_c']:.0f} °C"); self.v11_left_values["TORQUE"].config(text=f"{data['engine_torque_nm']:.0f} Nm"); self.v11_left_values["POWER"].config(text=f"{data['engine_power_kw']:.0f} kW"); self.v11_left_values["BOOST"].config(text=f"{data['boost_bar']:.2f} bar"); self.v11_left_values["DAMAGE"].config(text=f"{data['engine_damage']*100:.0f}%")
+            wheels=data.get("wheels") or []
+            tire_temps=[float(w.get("tire_temp_c",0.0)) for w in wheels if math.isfinite(float(w.get("tire_temp_c",0.0)))]
+            brake_temps=[float(w.get("brake_temp_c",0.0)) for w in wheels if math.isfinite(float(w.get("brake_temp_c",0.0)))]
+            self.v11_left_values["TIRE TEMP"].config(text=f"{sum(tire_temps)/len(tire_temps):.0f} °C" if tire_temps else "—")
+            self.v11_left_values["BRAKE TEMP"].config(text=f"{sum(brake_temps)/len(brake_temps):.0f} °C" if brake_temps else "—")
+            fuel_type = int(data.get("fuel_type", 0))
+            fu = self._fuel_amount_unit(fuel_type)
+            amount = self._display_fuel_amount(data['fuel_amount']) if fuel_type != 3 else float(data['fuel_amount'])
+            capacity = self._display_fuel_amount(data['fuel_capacity']) if fuel_type != 3 else float(data['fuel_capacity'])
+            self.v11_right_values["FUEL"].config(text=f"{amount:.1f}/{capacity:.1f} {fu}")
+            d=data['destination_distance_m']
+            self.v11_right_values["DESTINATION"].config(text="NONE" if d<0 else f"{self._display_distance_m(d):.2f} {'mi' if self._imperial_units else 'km'}")
+            self.v11_right_values["ROAD LIMIT"].config(text=f"{self._display_speed(data['road_speed_limit_kmh']):.0f} {'mph' if self._imperial_units else 'km/h'}" if data['road_speed_limit_kmh'] else "NONE")
+            self.v11_right_values["ODOMETER"].config(text=f"{self._display_distance_km(data['odometer_km']):.1f} {'mi' if self._imperial_units else 'km'}")
+            weather={0:"SUNNY",1:"RAIN",2:"FOG"}.get(data['weather'],"UNKNOWN"); self.v11_right_values["WEATHER"].config(text=weather+(f" {data['rain_strength']*100:.0f}%" if data['weather']==1 else ""))
+            self.v11_right_values["AIR TEMP"].config(text=f"{data['air_temp_c']:.0f} °C")
+            rate=self._display_fuel_rate(data['fuel_rate_lph'], fuel_type); self.v11_right_values["FUEL RATE"].config(text=f"{rate:.1f} {self._fuel_rate_unit(fuel_type)}")
+            self.race_values["TOTAL RACE TIME"].config(text=self._format_time(data['race_elapsed_s'])); self.race_values["LAP TIME"].config(text=self._format_time(data['lap_time_s'])); self.race_values["LAST LAP"].config(text=self._format_time(data['last_lap_s']) if data['last_lap_s']>0 else "--:--.--"); self.race_values["BEST LAP"].config(text=self._format_time(data['best_lap_s']) if data['best_lap_s']>0 else "--:--.--"); self.race_values["LAP"].config(text=str(data['lap_number'])); self.race_values["LAPS"].config(text=str(data['total_laps'])); self.race_values["POSITION"].config(text=str(data['race_position']) if data['race_position'] else "—"); self.race_values["RACERS"].config(text=str(data['num_racers']) if data['num_racers'] else "—"); self.race_values["CHECKPOINT"].config(text="—" if data['section_index']<0 else f"{data['section_index']+1}/{data['section_count']}")
+        else:
+            for v in self.v11_left_values.values(): v.config(text="—")
+            for v in self.v11_right_values.values(): v.config(text="—")
+            for k,v in self.race_values.items(): v.config(text="--:--.--" if k in ("TOTAL RACE TIME","LAP TIME","LAST LAP","BEST LAP") else "—")
+        self.user_status.config(text="● TELEMETRY LIVE" if connected else "TELEMETRY PAUSED",fg=self.accent if connected else MUTED)
 
     def update_expert(self, data, connected):
         if not hasattr(self, "expert_text"):
@@ -1691,9 +1616,9 @@ class App:
                 f"PACKET RATE    {self.receiver.rate:.1f} /s",
                 f"PACKETS        {self.receiver.packet_count}",
                 f"BAD PACKETS    {self.receiver.bad_packets}",
-                f"PACKET SIZE    {PACKET_SIZE} bytes",
+                f"PACKET SIZE    {data.get('packet_size', PACKET_SIZE)} bytes",
                 "",
-                f"SPEED          {data['speed_kmh']:.3f} km/h",
+                f"SPEED          {self._display_speed(data['speed_kmh']):.3f} {'mph' if self._imperial_units else 'km/h'}",
                 f"RPM            {data['engine_rpm']:.2f}",
                 f"GEAR           {data['current_gear']} / {data['max_forward_gear']}",
                 f"THROTTLE       {data['throttle']:.4f}",
@@ -1773,6 +1698,53 @@ class App:
                 f"TCS            {'ON' if flags & 0x20 else 'OFF'}",
                 f"CRUISE         {'ON' if flags & 0x40 else 'OFF'}",
             ]
+        elif self.page == "Native v1.1":
+            if not data.get("v11"):
+                lines = ["WAITING FOR NATIVE-v1.1 TELEMETRY", "", "Current packet is Native-v1.0."]
+            else:
+                lines = [
+                    f"PROTOCOL        {data['protocol']} ({data['packet_size']} bytes)",
+                    f"VEHICLE         {data.get('vehicle_name_en') or '—'}",
+                    f"VEHICLE KEY     {data.get('vehicle_key') or '—'}",
+                    f"REVERSE GEARS   {data['num_reverse_gears']}",
+                    f"AUTOPILOT MODE  {data['autopilot_mode']}",
+                    f"TURN SIGNAL     {data['turn_signal']}",
+                    f"TRANSMISSION    {data['transmission_type']}",
+                    f"FUEL TYPE       {data['fuel_type']}",
+                    f"MISSION         {data['mission_type']}",
+                    f"WEATHER         {data['weather']} / rain {data['rain_strength']:.2f}",
+                    f"DESTINATION     {self._display_distance_m(data['destination_distance_m']):.1f} {'mi' if self._imperial_units else 'm'}",
+                    f"COOLANT         {data['coolant_temp_c']:.1f} °C",
+                    f"TORQUE          {data['engine_torque_nm']:.2f} Nm",
+                    f"POWER           {data['engine_power_kw']:.2f} kW",
+                    f"BOOST           {data['boost_bar']:.3f} bar",
+                    f"ENGINE DAMAGE   {data['engine_damage']:.3f}",
+                    f"GEAR RATIO      {data['current_gear_ratio']:.4f}",
+                    f"CRUISE TARGET   {self._display_speed(data['cruise_target_kmh']):.1f} {'mph' if self._imperial_units else 'km/h'}",
+                    f"LIMITER TARGET  {self._display_speed(data['speed_limiter_target_kmh']):.1f} {'mph' if self._imperial_units else 'km/h'}",
+                    f"AUTOPILOT CAP   {self._display_speed(data['autopilot_max_speed_kmh']):.1f} {'mph' if self._imperial_units else 'km/h'}",
+                    f"FUEL            {(self._display_fuel_amount(data['fuel_amount']) if int(data.get('fuel_type',0)) != 3 else data['fuel_amount']):.2f} / {(self._display_fuel_amount(data['fuel_capacity']) if int(data.get('fuel_type',0)) != 3 else data['fuel_capacity']):.2f} {self._fuel_amount_unit(int(data.get('fuel_type',0))) }",
+                    f"FUEL RATE       {self._display_fuel_rate(data['fuel_rate_lph'], int(data.get('fuel_type',0))):.2f} {self._fuel_rate_unit(int(data.get('fuel_type',0)))}",
+                    f"FUEL ECONOMY    {self._display_fuel_economy(data['fuel_economy_kpl'], int(data.get('fuel_type',0))):.3f} {self._fuel_economy_unit(int(data.get('fuel_type',0))) }",
+                    f"EV POWER        {data['ev_power_ratio']:.3f}",
+                    f"ODOMETER        {self._display_distance_km(data['odometer_km']):.3f} {'mi' if self._imperial_units else 'km'}",
+                    f"ROAD LIMIT      {self._display_speed(data['road_speed_limit_kmh']):.1f} {'mph' if self._imperial_units else 'km/h'}",
+                    f"GROSS WEIGHT    {data['gross_weight_kg']:.1f} kg",
+                    f"CARGO WEIGHT    {data['cargo_weight_kg']:.1f} kg",
+                    f"RACE TIME       {self._format_time(data['race_elapsed_s'])}",
+                    f"LAP TIME        {self._format_time(data['lap_time_s'])}",
+                    f"LAST LAP        {self._format_time(data['last_lap_s'])}",
+                    f"BEST LAP        {self._format_time(data['best_lap_s'])}",
+                    f"LAP             {data['lap_number']} / {data['total_laps']}",
+                    f"RACE POSITION   {data['race_position']} / {data['num_racers']}",
+                    f"CHECKPOINT      {data['section_index'] + 1} / {data['section_count']}",
+                    f"TIME OF DAY     {data['time_of_day_h']:.2f} h",
+                    f"AIR TEMP        {data['air_temp_c']:.1f} °C",
+                    f"MONEY           {data['money']}",
+                    f"WHEELS          {data['wheel_count']}",
+                ]
+                for i, wheel in enumerate(data.get("wheels", []), 1):
+                    lines.append(f"WHEEL {i}       slip {wheel['slip_ratio']:.3f} | tire {wheel['tire_temp_c']:.1f} °C | brake {wheel['brake_temp_c']:.1f} °C | damage {wheel['tire_damage']:.3f}")
         elif self.page == "Raw Data":
             raw = data["raw"]
             lines = [
